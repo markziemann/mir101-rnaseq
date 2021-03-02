@@ -1,0 +1,325 @@
+---
+title: "Analysis of mir-101 RNA-seq data"
+author: "Mark Ziemann"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+theme: cosmo
+---
+
+## introduction
+run deseq2 with Matt's counts from AGRF
+
+```{r,libs}
+
+library("tidyverse")
+library("DESeq2")
+library("fgsea")
+library("gplots")
+library("mitch")
+library("vioplot")
+library("kableExtra")
+
+```
+
+## import data
+
+read counts from AGRF and genrate MDS plot.
+
+MM1 samples are the treatment group.
+MMN are the ctrl group.
+Matt please check this.
+
+```{r,importdata,fig.height=8,fig.width=8}
+
+# counts
+counts <- read.table("CAGRF13809_cnt.tsv",header=T,row.names=1)
+head(counts)
+colnames(counts) <- gsub("MMN","CTRL",colnames(counts))
+colnames(counts) <- gsub("MM1","M101",colnames(counts))
+head(counts)
+
+# sampleshet
+des<-as.data.frame(colnames(counts))
+des$grp<-as.numeric(grepl("M101",colnames(counts)))
+rownames(des)<-des[,1]
+des[,1]=NULL
+
+colours = c('lightblue', 'pink')
+mds <- cmdscale(dist(t(counts)))
+XMAX=max(mds[,1])*1.1
+XMIN=min(mds[,1])*1.1
+
+plot( mds , xlab="Coordinate 1", ylab="Coordinate 2", pch=19, cex=1.5,
+  col= colours[as.factor(des$grp)], type = "p" , xlim=c(XMIN,XMAX),main="MDS plot",bty="n" )
+
+legend('topright', col=colours, legend=c("Ctrl","miR-101"), pch = 16, cex = 1)
+text(mds*1.05, labels=colnames(counts) )
+
+pdf("mds.pdf")
+
+plot( mds , xlab="Coordinate 1", ylab="Coordinate 2", pch=19, cex=1.5,
+  col= colours[as.factor(des$grp)], type = "p" , xlim=c(XMIN,XMAX),main="MDS plot",bty="n" )
+
+legend('topright', col=colours, legend=c("Ctrl","miR-101"), pch = 16, cex = 1)
+text(mds*1.05, labels=colnames(counts) )
+
+dev.off()
+
+```
+
+## find stable genes
+
+There is a problem with the qRT-PCR validation.
+So here I will identify some stable genes based on low coefficient of variation.
+We can also look at expression of housekeeping genes ACTB and B2M.
+ACTB and B2M are actually not very stable genes according to this data and there thousands with more stable expression.
+
+```{r,stablegene}
+
+head(counts)
+
+x <- counts/colSums(counts) * 1e6
+
+xsd <- apply(x,1,sd)
+
+xmean <- rowMeans(x)
+
+xcv <- apply(x,1,sd) / rowMeans(x)
+
+x <- data.frame(x,xmean,xsd,xcv)
+
+head( x[order(x$xcv),] , 20) %>% kbl() %>% kable_styling()
+
+x[which(rownames(x) == "ACTB"),]
+
+x[which(rownames(x) == "B2M"),]
+
+hist(xcv,breaks=50,xlim=c(0,1),main="histogram of CV values")
+
+```
+
+## DESeq2
+
+Now run DESeq2 to identify differential expression.
+Then make some charts.
+
+```{r,deseq2,fig.height=8,fig.width=8}
+
+dds <- DESeqDataSetFromMatrix(countData = counts , colData = des, design = ~ grp)
+res <- DESeq(dds)
+z<- results(res)
+vsd <- vst(dds, blind=FALSE)
+
+#stick on the normalised expression values to the table
+zz<-cbind(as.data.frame(z),assay(vsd))
+
+#sort by p-value
+mm1<-as.data.frame(zz[order(zz$pvalue),])
+
+#some plots
+sig<-subset(zz,padj<0.05)
+SIG=nrow(sig)
+DN=nrow(subset(sig,log2FoldChange<0))
+UP=nrow(subset(sig,log2FoldChange>0))
+HEADER=paste("Ctrl vs miR-101:", SIG , "DGEs,", UP ,"upregulated,", DN, "downregulated")
+plot(log2(zz$baseMean),zz$log2FoldChange,cex=0.6, xlab="log2 base mean", 
+  ylab="log2 fold change" ,pch=19,col="#838383")
+points(log2(sig$baseMean),sig$log2FoldChange,cex=0.6,pch=19,col="red")
+mtext(HEADER)
+
+top<-head(sig,20)
+text(log2(top$baseMean)+1, top$log2FoldChange, labels = rownames(top),cex=0.7)
+
+#volcano plot
+plot(zz$log2FoldChange, -log2(zz$pvalue) ,cex=0.6, xlim=c(-4,6),
+  xlab="log2 fold change", ylab="-log2 p-value" ,pch=19,col="#838383")
+points(sig$log2FoldChange, -log2(sig$pvalue),cex=0.6,pch=19,col="red")
+text(top$log2FoldChange+0.5, -log2(top$pvalue), labels = rownames(top),cex=0.7)
+mtext(HEADER)
+
+pdf("volcanoplot.pdf")
+
+#volcano plot
+plot(zz$log2FoldChange, -log2(zz$pvalue) ,cex=0.6, xlim=c(-4,6),
+  xlab="log2 fold change", ylab="-log2 p-value" ,pch=19,col="#838383")
+points(sig$log2FoldChange, -log2(sig$pvalue),cex=0.6,pch=19,col="red")
+text(top$log2FoldChange+0.5, -log2(top$pvalue), labels = rownames(top),cex=0.8)
+mtext(HEADER)
+
+dev.off()
+
+# top N genes
+colfunc <- colorRampPalette(c("blue", "white", "red"))
+heatmap.2(  as.matrix(zz[1:50,c(7:ncol(zz))]), col=colfunc(25),scale="row", 
+ trace="none",margins = c(6,10), cexRow=0.7, main="Top 50 genes")
+
+pdf("heatmap.pdf")
+heatmap.2(  as.matrix(zz[1:50,c(7:ncol(zz))]), col=colfunc(25),scale="row",
+ trace="none",margins = c(6,10), cexRow=0.5, main="Top 50 genes")
+dev.off()
+
+#output DGE table
+write.table(zz,file="CAGRF13809_deseq.tsv",quote=F,sep="\t")
+
+```
+
+Run the mitch package with gene sets from Reactome.
+Check out the mitchreport.html file for the full report.
+
+
+```{r,mitch,fig.height=8,fig.width=8}
+
+# gene set downloaded 2021-Jan-08
+#download.file("https://reactome.org/download/current/ReactomePathways.gmt.zip",
+#  destfile="ReactomePathways.gmt.zip")
+#unzip("ReactomePathways.gmt.zip")
+genesets <- gmt_import("ReactomePathways.gmt")
+
+y <- mitch_import(mm1, DEtype="deseq2")
+
+res <- mitch_calc(y, genesets, priority="effect")
+
+head(res$enrichment_result,30)
+
+write.table(res$enrichment_result,file="CAGRF13809_mitch.tsv",quote=F,sep="\t")
+
+unlink("mitchreport.html")
+mitch_report(res, "mitchreport.html")
+
+top <- res$enrichment_result
+top <- head(subset(top,p.adjustANOVA<0.05),25)
+top <- top[order(-top$s.dist),]
+par(mar=c(5, 29, 4, 2))
+barplot(top$s.dist,horiz=TRUE,las=1,names.arg=top$set,cex.names=0.8, xlab="enrichment score")
+
+pdf("reactome_barplot.pdf")
+par(mar=c(5, 29, 4, 2))
+barplot(top$s.dist,horiz=TRUE,las=1,names.arg=top$set,cex.names=0.8, xlab="enrichment score")
+dev.off()
+
+par(mar=c(5, 5, 4, 2))
+pdf("reactome_volplot.pdf")
+plot(res$enrichment_result$s.dist,-log10(res$enrichment_result$pANOVA),
+  col="gray",pch=19,
+  xlab="enrichment score", ylab="-log10 p-value")
+grid()
+sig <- subset(res$enrichment_result,p.adjustANOVA<0.05)
+points(sig$s.dist,-log10(sig$pANOVA), col="red",pch=19)
+top <- head(sig,5)
+mtext("Reactome gene set enrichment")
+dev.off()
+
+plot(res$enrichment_result$s.dist,-log10(res$enrichment_result$pANOVA),
+  col="gray",pch=19,
+  xlab="enrichment score", ylab="-log10 p-value")
+grid()
+sig <- subset(res$enrichment_result,p.adjustANOVA<0.05)
+points(sig$s.dist,-log10(sig$pANOVA), col="red",pch=19)
+top <- head(sig,5)
+mtext("Reactome gene set enrichment")
+
+
+
+```
+
+Other genesets to look at.
+
+1. tRNA processing in the mitochondrion 
+
+2. Complex I biogenesis
+
+3. The citric acid (TCA) cycle and respiratory electron transport, and/or
+
+4. Respiratory electron transport, ATP synthesis by chemiosmotic coupling, and heat production by uncoupling proteins.
+
+5. Regulation of lipid metabolism by PPARalpha
+ 
+
+```{r,reactome}
+
+mysets <- c("tRNA processing in the mitochondrion",
+  "Complex I biogenesis",
+  "The citric acid (TCA) cycle and respiratory electron transport",
+  "Respiratory electron transport, ATP synthesis by chemiosmotic coupling, and heat production by uncoupling proteins.",
+  "Regulation of lipid metabolism by PPARalpha")
+
+mysets <- genesets[which(names(genesets) %in% mysets)]
+
+res <- mitch_calc(y, mysets, priority="effect")
+
+head(res$enrichment_result)
+
+unlink("mygeneset_report.html")
+mitch_report(res, "mygeneset_report.html")
+
+vioplot(res$detailed_sets,horizontal=TRUE,las=2,side="right",ylim=c(-8146,7835))
+grid()
+
+pdf("reactome_vioplot.pdf")
+par(mar=c(5, 29, 4, 2))
+vioplot(res$detailed_sets,horizontal=TRUE,las=2,side="right",ylim=c(-8146,7835))
+grid()
+dev.off()
+
+```
+
+## Starbase
+
+```{r,starbase}
+
+starbase <- gmt_import("starBaseV3.gmt")
+res <- mitch_calc(y, starbase, priority="significance",resrows=10)
+head(res$enrichment_result,10)
+
+sset <- subset(res$enrichment_result,setSize>49)
+head( sset[order(sset$s.dist),] )
+
+unlink("starbase_report.html")
+mitch_report(res, "starbase_report.html")
+
+par(mar=c(5, 20, 4, 2))
+
+vioplot(rev(res$detailed),horizontal=TRUE,las=2,side="right",ylim=c(-8146,7835))
+grid()
+
+pdf("starbase_vioplot.pdf")
+par(mar=c(5, 20, 4, 2))
+vioplot(rev(res$detailed),horizontal=TRUE,las=2,side="right",ylim=c(-8146,7835))
+grid()
+dev.off()
+
+par(mar=c(5, 5, 4, 2))
+pdf("starbase_volplot.pdf")
+plot(res$enrichment_result$s.dist,-log10(res$enrichment_result$pANOVA),
+  col="gray",pch=19,
+  xlab="enrichment score", ylab="-log10 p-value")
+grid()
+sig <- subset(res$enrichment_result,p.adjustANOVA<0.05)
+points(sig$s.dist,-log10(sig$pANOVA), col="red",pch=19)
+top <- head(sig,5)
+text(top$s.dist,-log10(top$pANOVA),labels=top$set)
+mtext("starBase miR target gene set enrichment")
+dev.off()
+
+plot(res$enrichment_result$s.dist,-log10(res$enrichment_result$pANOVA),
+  col="gray",pch=19,
+  xlab="enrichment score", ylab="-log10 p-value")
+grid()
+sig <- subset(res$enrichment_result,p.adjustANOVA<0.05)
+points(sig$s.dist,-log10(sig$pANOVA), col="red",pch=19)
+top <- head(sig,5)
+text(top$s.dist,-log10(top$pANOVA),labels=top$set)
+mtext("starBase miR target gene set enrichment")
+
+```
+
+
+## session information
+
+```{r,sessioninfo}
+
+sessionInfo()
+
+```
